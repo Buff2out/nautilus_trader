@@ -2746,6 +2746,31 @@ fn test_unsubscribe_bars(
 }
 
 #[rstest]
+fn test_subscribe_bars_uses_deterministic_handler_id(
+    clock: Rc<RefCell<TestClock>>,
+    cache: Rc<RefCell<Cache>>,
+    trader_id: TraderId,
+    audusd_sim: CurrencyPair,
+) {
+    let actor_id = register_data_actor(clock, cache, trader_id);
+    let mut actor = get_actor_unchecked::<TestDataActor>(&actor_id);
+    actor.start().unwrap();
+
+    let bar_type = BarType::from_str(&format!("{}-1-MINUTE-LAST-INTERNAL", audusd_sim.id)).unwrap();
+    actor.subscribe_bars(bar_type, None, None);
+
+    let expected = format!("{actor_id}-{}", get_bars_topic(bar_type.standard()));
+    let bus = get_message_bus();
+    let bus = bus.borrow();
+    let handler_ids = bus.router_bars.handler_ids();
+
+    assert!(
+        handler_ids.contains(&expected.as_str()),
+        "expected deterministic handler id '{expected}', got {handler_ids:?}"
+    );
+}
+
+#[rstest]
 fn test_request_instrument(
     clock: Rc<RefCell<TestClock>>,
     cache: Rc<RefCell<Cache>>,

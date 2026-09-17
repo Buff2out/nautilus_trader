@@ -1418,13 +1418,16 @@ pub trait DataActor {
         Self: 'static + Debug + Sized,
     {
         let actor_id = self.core().actor_id().inner();
-        let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_data(data);
-            } else {
-                log::error!("Actor {actor_id} not found for data handling");
-            }
-        });
+        let handler = ShareableMessageHandler::from_typed_with_id(
+            subscription_handler_id(actor_id, get_custom_topic(&data_type)),
+            move |data: &CustomData| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_data(data);
+                } else {
+                    log::error!("Actor {actor_id} not found for data handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_data(self.core_mut(), handler, data_type, client_id, params);
     }
@@ -1451,15 +1454,18 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         // Signals are published as `CustomData` wrapping a `Signal`; downcast
         // the inner value so subscribers receive the typed `Signal` in `on_signal`.
-        let handler = ShareableMessageHandler::from_typed(move |data: &CustomData| {
-            if let Some(signal) = data.data.as_any().downcast_ref::<Signal>() {
-                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                    actor.handle_signal(signal);
-                } else {
-                    log::error!("Actor {actor_id} not found for signal handling");
+        let handler = ShareableMessageHandler::from_typed_with_id(
+            subscription_handler_id(actor_id, get_signal_pattern(name)),
+            move |data: &CustomData| {
+                if let Some(signal) = data.data.as_any().downcast_ref::<Signal>() {
+                    if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                        actor.handle_signal(signal);
+                    } else {
+                        log::error!("Actor {actor_id} not found for signal handling");
+                    }
                 }
-            }
-        });
+            },
+        );
 
         DataActorCore::subscribe_signal(self.core_mut(), handler, name, priority);
     }
@@ -1521,13 +1527,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = get_quotes_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |quote: &QuoteTick| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_quote(quote);
-            } else {
-                log::error!("Actor {actor_id} not found for quote handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |quote: &QuoteTick| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_quote(quote);
+                } else {
+                    log::error!("Actor {actor_id} not found for quote handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_quotes(
             self.core_mut(),
@@ -1552,13 +1561,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let pattern = get_instruments_pattern(venue);
 
-        let handler = TypedHandler::from(move |instrument: &InstrumentAny| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_instrument(instrument);
-            } else {
-                log::error!("Actor {actor_id} not found for instruments handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, pattern),
+            move |instrument: &InstrumentAny| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_instrument(instrument);
+                } else {
+                    log::error!("Actor {actor_id} not found for instruments handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_instruments(
             self.core_mut(),
@@ -1583,13 +1595,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = get_instrument_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |instrument: &InstrumentAny| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_instrument(instrument);
-            } else {
-                log::error!("Actor {actor_id} not found for instrument handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |instrument: &InstrumentAny| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_instrument(instrument);
+                } else {
+                    log::error!("Actor {actor_id} not found for instrument handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_instrument(
             self.core_mut(),
@@ -1626,13 +1641,16 @@ pub trait DataActor {
             get_book_deltas_topic(instrument_id).into()
         };
 
-        let handler = TypedHandler::from(move |deltas: &OrderBookDeltas| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_book_deltas(deltas);
-            } else {
-                log::error!("Actor {actor_id} not found for book deltas handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, pattern),
+            move |deltas: &OrderBookDeltas| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_book_deltas(deltas);
+                } else {
+                    log::error!("Actor {actor_id} not found for book deltas handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_book_deltas(
             self.core_mut(),
@@ -1670,13 +1688,16 @@ pub trait DataActor {
             get_book_depth10_topic(instrument_id).into()
         };
 
-        let handler = TypedHandler::from(move |depth: &OrderBookDepth10| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_book_depth(depth);
-            } else {
-                log::error!("Actor {actor_id} not found for book depth handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, pattern),
+            move |depth: &OrderBookDepth10| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_book_depth(depth);
+                } else {
+                    log::error!("Actor {actor_id} not found for book depth handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_book_depth10(
             self.core_mut(),
@@ -1706,13 +1727,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = get_book_snapshots_topic(instrument_id, interval_ms);
 
-        let handler = TypedHandler::from(move |book: &OrderBook| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_book(book);
-            } else {
-                log::error!("Actor {actor_id} not found for book handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |book: &OrderBook| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_book(book);
+                } else {
+                    log::error!("Actor {actor_id} not found for book handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_book_at_interval(
             self.core_mut(),
@@ -1740,13 +1764,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = get_trades_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |trade: &TradeTick| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_trade(trade);
-            } else {
-                log::error!("Actor {actor_id} not found for trade handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |trade: &TradeTick| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_trade(trade);
+                } else {
+                    log::error!("Actor {actor_id} not found for trade handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_trades(
             self.core_mut(),
@@ -1772,13 +1799,16 @@ pub trait DataActor {
         // Aggregators publish emitted bars under the standard type, so subscribe on that topic
         let topic = get_bars_topic(bar_type.standard());
 
-        let handler = TypedHandler::from(move |bar: &Bar| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_bar(bar);
-            } else {
-                log::error!("Actor {actor_id} not found for bar handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |bar: &Bar| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_bar(bar);
+                } else {
+                    log::error!("Actor {actor_id} not found for bar handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_bars(self.core_mut(), topic, handler, bar_type, client_id, params);
     }
@@ -1796,13 +1826,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = get_mark_price_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |mark_price: &MarkPriceUpdate| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_mark_price(mark_price);
-            } else {
-                log::error!("Actor {actor_id} not found for mark price handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |mark_price: &MarkPriceUpdate| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_mark_price(mark_price);
+                } else {
+                    log::error!("Actor {actor_id} not found for mark price handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_mark_prices(
             self.core_mut(),
@@ -1827,13 +1860,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = get_index_price_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |index_price: &IndexPriceUpdate| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_index_price(index_price);
-            } else {
-                log::error!("Actor {actor_id} not found for index price handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |index_price: &IndexPriceUpdate| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_index_price(index_price);
+                } else {
+                    log::error!("Actor {actor_id} not found for index price handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_index_prices(
             self.core_mut(),
@@ -1858,13 +1894,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = get_funding_rate_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |funding_rate: &FundingRateUpdate| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_funding_rate(funding_rate);
-            } else {
-                log::error!("Actor {actor_id} not found for funding rate handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |funding_rate: &FundingRateUpdate| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_funding_rate(funding_rate);
+                } else {
+                    log::error!("Actor {actor_id} not found for funding rate handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_funding_rates(
             self.core_mut(),
@@ -1889,13 +1928,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = get_option_greeks_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |option_greeks: &OptionGreeks| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_option_greeks(option_greeks);
-            } else {
-                log::error!("Actor {actor_id} not found for option greeks handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |option_greeks: &OptionGreeks| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_option_greeks(option_greeks);
+                } else {
+                    log::error!("Actor {actor_id} not found for option greeks handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_option_greeks(
             self.core_mut(),
@@ -1920,13 +1962,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = get_instrument_status_topic(instrument_id);
 
-        let handler = ShareableMessageHandler::from_typed(move |status: &InstrumentStatus| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_instrument_status(status);
-            } else {
-                log::error!("Actor {actor_id} not found for instrument status handling");
-            }
-        });
+        let handler = ShareableMessageHandler::from_typed_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |status: &InstrumentStatus| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_instrument_status(status);
+                } else {
+                    log::error!("Actor {actor_id} not found for instrument status handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_instrument_status(
             self.core_mut(),
@@ -1951,13 +1996,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = get_instrument_close_topic(instrument_id);
 
-        let handler = ShareableMessageHandler::from_typed(move |close: &InstrumentClose| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_instrument_close(close);
-            } else {
-                log::error!("Actor {actor_id} not found for instrument close handling");
-            }
-        });
+        let handler = ShareableMessageHandler::from_typed_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |close: &InstrumentClose| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_instrument_close(close);
+                } else {
+                    log::error!("Actor {actor_id} not found for instrument close handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_instrument_close(
             self.core_mut(),
@@ -1987,13 +2035,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = get_option_chain_topic(series_id);
 
-        let handler = TypedHandler::from(move |slice: &OptionChainSlice| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_option_chain(slice);
-            } else {
-                log::error!("Actor {actor_id} not found for option chain handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |slice: &OptionChainSlice| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_option_chain(slice);
+                } else {
+                    log::error!("Actor {actor_id} not found for option chain handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_option_chain(
             self.core_mut(),
@@ -2021,13 +2072,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = defi::switchboard::get_defi_blocks_topic(chain);
 
-        let handler = TypedHandler::from(move |block: &Block| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_block(block);
-            } else {
-                log::error!("Actor {actor_id} not found for block handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |block: &Block| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_block(block);
+                } else {
+                    log::error!("Actor {actor_id} not found for block handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_blocks(self.core_mut(), topic, handler, chain, client_id, params);
     }
@@ -2046,13 +2100,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = defi::switchboard::get_defi_pool_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |pool: &Pool| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_pool(pool);
-            } else {
-                log::error!("Actor {actor_id} not found for pool handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |pool: &Pool| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_pool(pool);
+                } else {
+                    log::error!("Actor {actor_id} not found for pool handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_pool(
             self.core_mut(),
@@ -2078,13 +2135,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = defi::switchboard::get_defi_pool_swaps_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |swap: &PoolSwap| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_pool_swap(swap);
-            } else {
-                log::error!("Actor {actor_id} not found for pool swap handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |swap: &PoolSwap| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_pool_swap(swap);
+                } else {
+                    log::error!("Actor {actor_id} not found for pool swap handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_pool_swaps(
             self.core_mut(),
@@ -2110,13 +2170,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = defi::switchboard::get_defi_liquidity_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |update: &PoolLiquidityUpdate| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_pool_liquidity_update(update);
-            } else {
-                log::error!("Actor {actor_id} not found for pool liquidity update handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |update: &PoolLiquidityUpdate| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_pool_liquidity_update(update);
+                } else {
+                    log::error!("Actor {actor_id} not found for pool liquidity update handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_pool_liquidity_updates(
             self.core_mut(),
@@ -2142,13 +2205,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = defi::switchboard::get_defi_collect_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |collect: &PoolFeeCollect| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_pool_fee_collect(collect);
-            } else {
-                log::error!("Actor {actor_id} not found for pool fee collect handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |collect: &PoolFeeCollect| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_pool_fee_collect(collect);
+                } else {
+                    log::error!("Actor {actor_id} not found for pool fee collect handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_pool_fee_collects(
             self.core_mut(),
@@ -2174,13 +2240,16 @@ pub trait DataActor {
         let actor_id = self.core().actor_id().inner();
         let topic = defi::switchboard::get_defi_flash_topic(instrument_id);
 
-        let handler = TypedHandler::from(move |flash: &PoolFlash| {
-            if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
-                actor.handle_pool_flash(flash);
-            } else {
-                log::error!("Actor {actor_id} not found for pool flash handling");
-            }
-        });
+        let handler = TypedHandler::from_with_id(
+            subscription_handler_id(actor_id, topic),
+            move |flash: &PoolFlash| {
+                if let Some(mut actor) = try_get_actor_unchecked::<Self>(&actor_id) {
+                    actor.handle_pool_flash(flash);
+                } else {
+                    log::error!("Actor {actor_id} not found for pool flash handling");
+                }
+            },
+        );
 
         DataActorCore::subscribe_pool_flash_events(
             self.core_mut(),
@@ -5520,6 +5589,16 @@ impl DataActorNative for DataActorCore {
     fn core_mut(&mut self) -> &mut DataActorCore {
         self
     }
+}
+
+/// Returns a deterministic subscription handler ID unique per `(actor, topic)`.
+///
+/// Subscription IDs must not depend on process entropy: subscribers sharing
+/// `(priority, pattern)` are delivered in `handler_id` order
+/// (`TypedSubscription::delivery_order`), so a random ID makes the delivery order
+/// unspecified for otherwise identical subscriptions.
+fn subscription_handler_id(actor_id: Ustr, topic: impl AsRef<str>) -> String {
+    format!("{actor_id}-{}", topic.as_ref())
 }
 
 fn check_timestamps(

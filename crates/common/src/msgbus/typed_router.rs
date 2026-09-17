@@ -474,6 +474,31 @@ mod tests {
     }
 
     #[rstest]
+    fn test_topic_router_same_pattern_delivers_in_handler_id_order() {
+        let mut router = TopicRouter::<i32>::new();
+        let order = Rc::new(RefCell::new(Vec::new()));
+
+        // Registered in reverse handler-ID order to prove delivery follows the ID,
+        // not the subscription call order.
+        let second_order = order.clone();
+        let second = TypedHandler::from_with_id("ACTOR-002-data.bars.ETHUSDT", move |_: &i32| {
+            second_order.borrow_mut().push("ACTOR-002");
+        });
+        let first_order = order.clone();
+        let first = TypedHandler::from_with_id("ACTOR-001-data.bars.ETHUSDT", move |_: &i32| {
+            first_order.borrow_mut().push("ACTOR-001");
+        });
+
+        router.subscribe("data.bars.*".into(), second, 0);
+        router.subscribe("data.bars.*".into(), first, 0);
+
+        let topic: MStr<Topic> = "data.bars.ETHUSDT".into();
+        router.publish(topic, &1);
+
+        assert_eq!(*order.borrow(), vec!["ACTOR-001", "ACTOR-002"]);
+    }
+
+    #[rstest]
     fn test_topic_router_unsubscribe() {
         let mut router = TopicRouter::<String>::new();
         let received = Rc::new(RefCell::new(Vec::new()));

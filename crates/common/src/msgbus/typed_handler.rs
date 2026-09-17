@@ -149,7 +149,18 @@ impl ShareableMessageHandler {
         T: 'static,
         F: Fn(&T) + 'static,
     {
-        TypedHandler(Rc::new(DowncastingHandler::new(f)))
+        TypedHandler(Rc::new(DowncastingHandler::new(None::<&str>, f)))
+    }
+
+    /// Creates a handler from a typed closure with a custom ID.
+    ///
+    /// The callback will only be invoked if the message downcasts successfully.
+    pub fn from_typed_with_id<S: AsRef<str>, T, F>(id: S, f: F) -> Self
+    where
+        T: 'static,
+        F: Fn(&T) + 'static,
+    {
+        TypedHandler(Rc::new(DowncastingHandler::new(Some(id), f)))
     }
 
     /// Creates a handler from an Any-typed closure.
@@ -169,9 +180,13 @@ struct DowncastingHandler<T, F: Fn(&T)> {
 }
 
 impl<T: 'static, F: Fn(&T) + 'static> DowncastingHandler<T, F> {
-    fn new(callback: F) -> Self {
+    fn new<S: AsRef<str>>(id: Option<S>, callback: F) -> Self {
+        let id_ustr = id.map_or_else(
+            || generate_handler_id(&callback),
+            |s| Ustr::from(s.as_ref()),
+        );
         Self {
-            id: generate_handler_id(&callback),
+            id: id_ustr,
             callback,
             _marker: PhantomData,
         }
@@ -469,6 +484,13 @@ mod tests {
         let handler = TypedHandler::from_with_id("custom-id", |_msg: &i32| {});
 
         assert_eq!(handler.id().as_str(), "custom-id");
+    }
+
+    #[rstest]
+    fn test_shareable_message_handler_from_typed_with_custom_id() {
+        let handler = ShareableMessageHandler::from_typed_with_id("typed-custom-id", |_: &i32| {});
+
+        assert_eq!(handler.id().as_str(), "typed-custom-id");
     }
 
     #[rstest]
