@@ -3627,8 +3627,7 @@ impl ExecutionManager {
             // evidence about this order.
             let identity_matches = order.venue_order_id() == Some(report.venue_order_id)
                 && order.filled_qty() == report.filled_qty;
-            if identity_matches
-                && let Some(check) = self.inflight_checks.get_mut(&client_order_id)
+            if identity_matches && let Some(check) = self.inflight_checks.get_mut(&client_order_id)
             {
                 check.last_venue_status = Some(report.order_status);
             }
