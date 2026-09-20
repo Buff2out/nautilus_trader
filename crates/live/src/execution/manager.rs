@@ -3618,11 +3618,20 @@ impl ExecutionManager {
         ) && !accepted_during_pending_command
         {
             self.clear_recon_tracking(&client_order_id, report.order_status.is_closed());
-        } else if let Some(check) = self.inflight_checks.get_mut(&client_order_id) {
+        } else if let Some(order) = self.get_order(client_order_id) {
             // This report leaves a tracked command unresolved, so it is the
             // venue's latest word on the order; the retry budget uses it as
             // the positive evidence that a cancel/modify did not take effect.
-            check.last_venue_status = Some(report.order_status);
+            // Mirror the engine's identity predicate: a stale report for a
+            // superseded venue_order_id or a different fill state is not
+            // evidence about this order.
+            let identity_matches = order.venue_order_id() == Some(report.venue_order_id)
+                && order.filled_qty() == report.filled_qty;
+            if identity_matches
+                && let Some(check) = self.inflight_checks.get_mut(&client_order_id)
+            {
+                check.last_venue_status = Some(report.order_status);
+            }
         }
 
         // Dispatch may suppress a terminal report, such as a stale cancel for the
@@ -7168,6 +7177,92 @@ mod tests {
                 .and_then(|check| check.last_venue_status),
             Some(OrderStatus::Accepted),
             "the latest venue status must be retained for the retry-budget decision",
+        );
+    }
+
+    #[rstest]
+    #[case(OrderStatus::PendingUpdate)]
+    #[case(OrderStatus::PendingCancel)]
+    fn test_mismatched_accepted_report_does_not_become_inflight_evidence(
+        #[case] pending_status: OrderStatus,
+    ) {
+        let client_order_id = ClientOrderId::from("O-STALE-LEG");
+        let venue_order_id = VenueOrderId::from("V-STALE-LEG");
+        let superseded_venue_order_id = VenueOrderId::from("V-SUPERSEDED-LEG");
+        let account_id = AccountId::from("TEST-001");
+        let client_id = ClientId::from("TEST");
+        let instrument_id = crypto_perpetual_ethusdt().id();
+        let clock = Rc::new(RefCell::new(TestClock::new()));
+        let cache = Rc::new(RefCell::new(Cache::default()));
+        insert_accepted_limit_order(
+            &cache,
+            client_order_id,
+            venue_order_id,
+            instrument_id,
+            client_id,
+        );
+
+        let order = cache.borrow().order_owned(&client_order_id).unwrap();
+        let event = match pending_status {
+            OrderStatus::PendingUpdate => OrderEventAny::PendingUpdate(
+                OrderPendingUpdateSpec::builder()
+                    .trader_id(order.trader_id())
+                    .strategy_id(order.strategy_id())
+                    .instrument_id(instrument_id)
+                    .client_order_id(client_order_id)
+                    .account_id(account_id)
+                    .venue_order_id(venue_order_id)
+                    .build(),
+            ),
+            OrderStatus::PendingCancel => OrderEventAny::PendingCancel(
+                OrderPendingCancelSpec::builder()
+                    .trader_id(order.trader_id())
+                    .strategy_id(order.strategy_id())
+                    .instrument_id(instrument_id)
+                    .client_order_id(client_order_id)
+                    .account_id(account_id)
+                    .venue_order_id(venue_order_id)
+                    .build(),
+            ),
+            _ => unreachable!(),
+        };
+        cache.borrow_mut().update_order(&event).unwrap();
+
+        let mut manager =
+            ExecutionManager::new(clock, cache.clone(), ExecutionManagerConfig::default())
+                .expect("valid config");
+        manager.register_inflight(client_order_id);
+
+        // An Accepted snapshot for a superseded venue_order_id of the same
+        // client order must not become the retry-budget evidence.
+        let report = OrderStatusReport::new(
+            account_id,
+            instrument_id,
+            Some(client_order_id),
+            superseded_venue_order_id,
+            OrderSide::Buy.into(),
+            OrderType::Limit,
+            TimeInForce::Gtc,
+            OrderStatus::Accepted,
+            Quantity::from("10.0"),
+            Quantity::from("0.0"),
+            UnixNanos::from(1_000),
+            UnixNanos::from(1_000),
+            UnixNanos::from(1_000),
+            None,
+        )
+        .with_price(Price::from("100.0"));
+
+        manager.observe_execution_report(&ExecutionReport::Order(Box::new(report)));
+
+        assert!(manager.inflight_checks.contains_key(&client_order_id));
+        assert_eq!(
+            manager
+                .inflight_checks
+                .get(&client_order_id)
+                .and_then(|check| check.last_venue_status),
+            None,
+            "a mismatched venue_order_id must not become inflight evidence",
         );
     }
 
