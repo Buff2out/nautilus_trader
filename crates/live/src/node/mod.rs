@@ -5438,7 +5438,7 @@ mod tests {
         tokio::test(start_paused = true)
     )]
     #[cfg_attr(all(feature = "simulation", madsim), madsim::test)]
-    async fn test_batch_cancel_command_registers_each_child_for_inflight_timeout() {
+    async fn test_batch_cancel_children_retain_until_venue_evidence() {
         use nautilus_common::messages::execution::{BatchCancelOrders, CancelOrder};
         use nautilus_model::{events::OrderPendingCancel, identifiers::ClientOrderId};
 
@@ -5477,9 +5477,8 @@ mod tests {
                 .price(Price::from("100.0"))
                 .build();
             let venue_order_id = VenueOrderId::from(format!("V-{client_order_id}").as_str());
-            // Model the production batch-cancel path: each child is accepted, then
-            // moved to PendingCancel, so an inflight timeout must emit a Canceled
-            // event (not a Submitted-order rejection).
+            // Model the production batch-cancel path: each child is accepted,
+            // then moved to PendingCancel.
             let submitted = TestOrderEventStubs::submitted(&order, account_id);
             let accepted = TestOrderEventStubs::accepted(&order, account_id, venue_order_id);
             let pending_cancel = OrderEventAny::PendingCancel(OrderPendingCancel::new(
@@ -5531,21 +5530,54 @@ mod tests {
 
         node.observe_exec_command_before_dispatch(&command);
         advance_clock(Duration::from_millis(101)).await;
-        let result = node.exec_manager.check_inflight_orders();
-        let timed_out_ids = result
+
+        // Retry budget reached with no venue report: the children stay
+        // unresolved and keep polling; no Canceled event may be synthesized
+        // from elapsed time alone.
+        let first = node.exec_manager.check_inflight_orders();
+        assert!(first.events.is_empty());
+        assert_eq!(first.queries.len(), child_ids.len());
+
+        // A live accepted snapshot for each child is positive evidence that the
+        // batch cancel did not take effect: each resolves as CancelRejected.
+        for client_order_id in child_ids {
+            let venue_order_id = VenueOrderId::from(format!("V-{client_order_id}").as_str());
+            let report = OrderStatusReport::new(
+                account_id,
+                instrument_id,
+                Some(client_order_id),
+                venue_order_id,
+                OrderSide::Buy.into(),
+                OrderType::Limit,
+                TimeInForce::Gtc,
+                OrderStatus::Accepted,
+                Quantity::from("10.0"),
+                Quantity::from("0.0"),
+                UnixNanos::default(),
+                UnixNanos::default(),
+                UnixNanos::default(),
+                None,
+            );
+            node.exec_manager
+                .observe_execution_report(&ExecutionReport::Order(Box::new(report)));
+        }
+
+        advance_clock(Duration::from_millis(200)).await;
+        let resolved = node.exec_manager.check_inflight_orders();
+        let resolved_ids = resolved
             .events
             .iter()
             .map(OrderEventAny::client_order_id)
             .collect::<IndexSet<_>>();
 
-        assert_eq!(timed_out_ids, IndexSet::from(child_ids));
-        assert_eq!(result.events.len(), child_ids.len());
+        assert_eq!(resolved_ids, IndexSet::from(child_ids));
         assert!(
-            result
+            resolved
                 .events
                 .iter()
-                .all(|event| matches!(event, OrderEventAny::Canceled(_))),
-            "batch-cancel children must time out as Canceled events",
+                .all(|event| matches!(event, OrderEventAny::CancelRejected(_))),
+            "batch-cancel children must resolve as CancelRejected from live venue evidence, was {:?}",
+            resolved.events,
         );
     }
 

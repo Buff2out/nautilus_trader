@@ -54,7 +54,8 @@ use nautilus_core::{Params, UUID4, UnixNanos};
 use nautilus_execution::{
     engine::ExecutionEngine,
     reconciliation::{
-        create_position_reconciliation_venue_order_id, process_mass_status_for_reconciliation,
+        create_position_reconciliation_venue_order_id, generate_reconciliation_order_events,
+        process_mass_status_for_reconciliation,
         process_mass_status_for_reconciliation_without_synthetic_reports,
     },
 };
@@ -4998,42 +4999,6 @@ async fn test_reconcile_mass_status_sorts_events_chronologically() {
     tokio::test(start_paused = true)
 )]
 #[cfg_attr(all(feature = "simulation", madsim), madsim::test)]
-async fn test_inflight_order_generates_rejection_after_max_retries() {
-    let config = ExecutionManagerConfig {
-        inflight_threshold_ms: 100,
-        inflight_max_retries: 1,
-        ..Default::default()
-    };
-    let mut ctx = TestContext::with_config(config);
-    let instrument_id = test_instrument_id();
-    let client_order_id = ClientOrderId::from("O-001");
-
-    ctx.add_instrument(test_instrument());
-
-    // Order must be submitted (have account_id) to generate rejection
-    let order = create_submitted_order("O-001", instrument_id, OrderSide::Buy, "1.0", "3000.00");
-    ctx.add_order(order);
-
-    ctx.manager.register_inflight(client_order_id);
-    ctx.advance_both(dst::time::Duration::from_millis(200))
-        .await; // 200ms, past threshold
-
-    let result = ctx.manager.check_inflight_orders();
-
-    assert_eq!(result.events.len(), 1);
-    assert!(matches!(result.events[0], OrderEventAny::Rejected(_)));
-
-    if let OrderEventAny::Rejected(rejected) = &result.events[0] {
-        assert_eq!(rejected.client_order_id, client_order_id);
-        assert_eq!(rejected.reason.as_str(), "INFLIGHT_TIMEOUT");
-    }
-}
-
-#[cfg_attr(
-    not(all(feature = "simulation", madsim)),
-    tokio::test(start_paused = true)
-)]
-#[cfg_attr(all(feature = "simulation", madsim), madsim::test)]
 async fn test_inflight_timeout_uses_monotonic_gate_and_domain_event_timestamp() {
     let config = ExecutionManagerConfig {
         inflight_threshold_ms: 100,
@@ -5043,18 +5008,38 @@ async fn test_inflight_timeout_uses_monotonic_gate_and_domain_event_timestamp() 
     let mut ctx = TestContext::with_config(config);
     let instrument_id = test_instrument_id();
     let client_order_id = ClientOrderId::from("O-SPLIT");
+    let venue_order_id = VenueOrderId::from("V-SPLIT");
 
     ctx.add_instrument(test_instrument());
-    let order = create_submitted_order("O-SPLIT", instrument_id, OrderSide::Buy, "1.0", "3000.00");
+    let order = create_pending_cancel_order(
+        "O-SPLIT",
+        instrument_id,
+        OrderSide::Buy,
+        "1.0",
+        "3000.00",
+        venue_order_id,
+    );
     ctx.add_order(order);
 
     ctx.manager.register_inflight(client_order_id);
+    let report = create_order_status_report(
+        Some(client_order_id),
+        venue_order_id,
+        instrument_id,
+        OrderStatus::Accepted,
+        Quantity::from("1.0"),
+        Quantity::from("0"),
+    );
+    ctx.manager
+        .observe_execution_report(&ExecutionReport::Order(Box::new(report)));
+
     let domain_ts = ctx.clock.borrow().timestamp_ns();
     advance_clock(dst::time::Duration::from_millis(200)).await;
 
     let result = ctx.manager.check_inflight_orders();
 
     assert_eq!(result.events.len(), 1);
+    assert!(matches!(result.events[0], OrderEventAny::CancelRejected(_)));
     assert_eq!(result.events[0].ts_event(), domain_ts);
 }
 
@@ -5265,13 +5250,13 @@ async fn test_inflight_increments_retry_count_before_max() {
     assert!(result2.events.is_empty()); // Still not at max
     assert_eq!(result2.queries.len(), 1);
 
-    // Third check - retry count becomes 3, equals max, generates rejection
+    // Third check - retry count reaches max with no venue evidence: the order
+    // is retained unresolved and keeps polling instead of being terminalized.
     ctx.advance_both(dst::time::Duration::from_millis(200))
         .await;
     let result3 = ctx.manager.check_inflight_orders();
-    assert_eq!(result3.events.len(), 1);
-    assert!(matches!(result3.events[0], OrderEventAny::Rejected(_)));
-    assert!(result3.queries.is_empty());
+    assert!(result3.events.is_empty());
+    assert_eq!(result3.queries.len(), 1);
 }
 
 #[cfg_attr(
@@ -5279,7 +5264,8 @@ async fn test_inflight_increments_retry_count_before_max() {
     tokio::test(start_paused = true)
 )]
 #[cfg_attr(all(feature = "simulation", madsim), madsim::test)]
-async fn test_inflight_pending_update_generates_canceled() {
+async fn test_inflight_pending_update_with_unchanged_accepted_at_max_retries_emits_modify_rejected(
+) {
     let config = ExecutionManagerConfig {
         inflight_threshold_ms: 100,
         inflight_max_retries: 1,
@@ -5303,6 +5289,20 @@ async fn test_inflight_pending_update_generates_canceled() {
     ctx.add_order(order);
 
     ctx.manager.register_inflight(client_order_id);
+
+    // The venue still reports the order accepted while the modify is pending:
+    // positive evidence the modify never took effect.
+    let report = create_order_status_report(
+        Some(client_order_id),
+        venue_order_id,
+        instrument_id,
+        OrderStatus::Accepted,
+        Quantity::from("1.0"),
+        Quantity::from("0"),
+    );
+    ctx.manager
+        .observe_execution_report(&ExecutionReport::Order(Box::new(report)));
+
     ctx.advance_both(dst::time::Duration::from_millis(200))
         .await; // 200ms, past threshold
 
@@ -5310,14 +5310,20 @@ async fn test_inflight_pending_update_generates_canceled() {
 
     assert_eq!(result.events.len(), 1);
     assert!(
-        matches!(result.events[0], OrderEventAny::Canceled(_)),
-        "Expected Canceled for PendingUpdate, was {:?}",
+        matches!(result.events[0], OrderEventAny::ModifyRejected(_)),
+        "Expected ModifyRejected for an unchanged accepted venue report, was {:?}",
         result.events[0]
     );
 
-    if let OrderEventAny::Canceled(canceled) = &result.events[0] {
-        assert_eq!(canceled.client_order_id, client_order_id);
-    }
+    // The rejection restores the pre-command state instead of fabricating a
+    // terminal outcome.
+    ctx.cache
+        .borrow_mut()
+        .update_order(&result.events[0])
+        .unwrap();
+    let order = ctx.get_order(&client_order_id).unwrap();
+    assert_eq!(order.status(), OrderStatus::Accepted);
+    assert_eq!(ctx.manager.recon_check_retry_count(&client_order_id), 0);
 }
 
 #[cfg_attr(
@@ -5325,7 +5331,8 @@ async fn test_inflight_pending_update_generates_canceled() {
     tokio::test(start_paused = true)
 )]
 #[cfg_attr(all(feature = "simulation", madsim), madsim::test)]
-async fn test_inflight_pending_cancel_generates_canceled() {
+async fn test_inflight_pending_cancel_with_unchanged_accepted_at_max_retries_emits_cancel_rejected(
+) {
     let config = ExecutionManagerConfig {
         inflight_threshold_ms: 100,
         inflight_max_retries: 1,
@@ -5349,6 +5356,18 @@ async fn test_inflight_pending_cancel_generates_canceled() {
     ctx.add_order(order);
 
     ctx.manager.register_inflight(client_order_id);
+
+    let report = create_order_status_report(
+        Some(client_order_id),
+        venue_order_id,
+        instrument_id,
+        OrderStatus::Accepted,
+        Quantity::from("1.0"),
+        Quantity::from("0"),
+    );
+    ctx.manager
+        .observe_execution_report(&ExecutionReport::Order(Box::new(report)));
+
     ctx.advance_both(dst::time::Duration::from_millis(200))
         .await;
 
@@ -5356,14 +5375,152 @@ async fn test_inflight_pending_cancel_generates_canceled() {
 
     assert_eq!(result.events.len(), 1);
     assert!(
-        matches!(result.events[0], OrderEventAny::Canceled(_)),
-        "Expected Canceled for PendingCancel, was {:?}",
+        matches!(result.events[0], OrderEventAny::CancelRejected(_)),
+        "Expected CancelRejected for an unchanged accepted venue report, was {:?}",
         result.events[0]
     );
 
-    if let OrderEventAny::Canceled(canceled) = &result.events[0] {
-        assert_eq!(canceled.client_order_id, client_order_id);
-    }
+    ctx.cache
+        .borrow_mut()
+        .update_order(&result.events[0])
+        .unwrap();
+    let order = ctx.get_order(&client_order_id).unwrap();
+    assert_eq!(order.status(), OrderStatus::Accepted);
+    assert_eq!(ctx.manager.recon_check_retry_count(&client_order_id), 0);
+}
+
+#[cfg_attr(
+    not(all(feature = "simulation", madsim)),
+    tokio::test(start_paused = true)
+)]
+#[cfg_attr(all(feature = "simulation", madsim), madsim::test)]
+async fn test_inflight_pending_cancel_without_any_report_retains_pending() {
+    let config = ExecutionManagerConfig {
+        inflight_threshold_ms: 100,
+        inflight_max_retries: 1,
+        ..Default::default()
+    };
+    let mut ctx = TestContext::with_config(config);
+    let instrument_id = test_instrument_id();
+    let client_order_id = ClientOrderId::from("O-RETAINED");
+    let venue_order_id = VenueOrderId::from("V-003");
+
+    ctx.add_instrument(test_instrument());
+
+    let order = create_pending_cancel_order(
+        "O-RETAINED",
+        instrument_id,
+        OrderSide::Buy,
+        "1.0",
+        "3000.00",
+        venue_order_id,
+    );
+    ctx.add_order(order);
+
+    ctx.manager.register_inflight(client_order_id);
+    ctx.advance_both(dst::time::Duration::from_millis(200))
+        .await;
+
+    // Retry budget reached without any venue report: no terminal event may be
+    // synthesized from elapsed time alone; the order stays unresolved and the
+    // poll continues.
+    let first = ctx.manager.check_inflight_orders();
+    assert!(
+        first.events.is_empty(),
+        "No terminal event may be synthesized without venue evidence, got {:?}",
+        first.events
+    );
+    assert_eq!(first.queries.len(), 1);
+
+    ctx.advance_both(dst::time::Duration::from_millis(150))
+        .await;
+
+    // Over-budget polls back off (the next interval is 2x the threshold): a
+    // 150ms gap stays below the 200ms gate.
+    let gated = ctx.manager.check_inflight_orders();
+    assert!(gated.events.is_empty());
+    assert!(gated.queries.is_empty());
+
+    ctx.advance_both(dst::time::Duration::from_millis(100))
+        .await;
+
+    let third = ctx.manager.check_inflight_orders();
+    assert!(third.events.is_empty());
+    assert_eq!(third.queries.len(), 1);
+    assert_eq!(ctx.manager.recon_check_retry_count(&client_order_id), 3);
+
+    // A fresh accepted venue report now resolves the command attempt as
+    // rejected: the cancel did not take effect.
+    let report = create_order_status_report(
+        Some(client_order_id),
+        venue_order_id,
+        instrument_id,
+        OrderStatus::Accepted,
+        Quantity::from("1.0"),
+        Quantity::from("0"),
+    );
+    ctx.manager
+        .observe_execution_report(&ExecutionReport::Order(Box::new(report)));
+
+    ctx.advance_both(dst::time::Duration::from_millis(500))
+        .await;
+
+    let resolved = ctx.manager.check_inflight_orders();
+    assert_eq!(resolved.events.len(), 1);
+    assert!(matches!(
+        resolved.events[0],
+        OrderEventAny::CancelRejected(_)
+    ));
+    assert!(resolved.queries.is_empty());
+    assert_eq!(ctx.manager.recon_check_retry_count(&client_order_id), 0);
+}
+
+#[cfg_attr(
+    not(all(feature = "simulation", madsim)),
+    tokio::test(start_paused = true)
+)]
+#[cfg_attr(all(feature = "simulation", madsim), madsim::test)]
+async fn test_late_venue_cancel_after_reconcile_cancel_rejected_emits_canceled() {
+    let ctx = TestContext::new();
+    let instrument_id = test_instrument_id();
+    let client_order_id = ClientOrderId::from("O-LATE-CANCEL");
+    let venue_order_id = VenueOrderId::from("V-LATE-CANCEL");
+
+    ctx.add_instrument(test_instrument());
+
+    // Post-recovery state: the local order is accepted again after the
+    // reconciliation cancel rejection.
+    let order = create_accepted_order(
+        "O-LATE-CANCEL",
+        instrument_id,
+        OrderSide::Buy,
+        "1.0",
+        "3000.00",
+        venue_order_id,
+    );
+    ctx.add_order(order);
+
+    // The venue then honors the cancel late: the terminal report must still be
+    // applied and supersede the recovered state.
+    let report = create_order_status_report(
+        Some(client_order_id),
+        venue_order_id,
+        instrument_id,
+        OrderStatus::Canceled,
+        Quantity::from("1.0"),
+        Quantity::from("0"),
+    );
+
+    let order = ctx.get_order(&client_order_id).unwrap();
+    let events =
+        generate_reconciliation_order_events(&order, &report, None, UnixNanos::from(2_000));
+
+    assert_eq!(events.len(), 1);
+    assert!(matches!(events[0], OrderEventAny::Canceled(_)));
+
+    ctx.cache.borrow_mut().update_order(&events[0]).unwrap();
+    let order = ctx.get_order(&client_order_id).unwrap();
+    assert_eq!(order.status(), OrderStatus::Canceled);
 }
 
 #[cfg_attr(
@@ -5410,7 +5567,7 @@ async fn test_inflight_generates_query_before_max_retries() {
     tokio::test(start_paused = true)
 )]
 #[cfg_attr(all(feature = "simulation", madsim), madsim::test)]
-async fn test_inflight_no_query_at_max_retries() {
+async fn test_inflight_submitted_at_max_retries_queries_before_rejecting() {
     let config = ExecutionManagerConfig {
         inflight_threshold_ms: 100,
         inflight_max_retries: 2,
@@ -5433,21 +5590,22 @@ async fn test_inflight_no_query_at_max_retries() {
     assert!(result1.events.is_empty());
     assert_eq!(result1.queries.len(), 1);
 
-    // Second check - at max retries, generates terminal event only
+    // Second check - at max retries without venue evidence: retained and still
+    // polling; no terminal event is synthesized from elapsed time alone.
     ctx.advance_both(dst::time::Duration::from_millis(200))
         .await;
     let result2 = ctx.manager.check_inflight_orders();
 
-    assert_eq!(
-        result2.events.len(),
-        1,
-        "Should generate terminal event at max retries"
-    );
     assert!(
-        result2.queries.is_empty(),
-        "Should not generate queries at max retries"
+        result2.events.is_empty(),
+        "No terminal event without venue evidence, got {:?}",
+        result2.events
     );
-    assert!(matches!(result2.events[0], OrderEventAny::Rejected(_)));
+    assert_eq!(
+        result2.queries.len(),
+        1,
+        "Retained unresolved orders keep polling"
+    );
 }
 
 #[cfg_attr(
@@ -5623,19 +5781,38 @@ async fn test_inflight_terminal_event_clears_tracking() {
     let mut ctx = TestContext::with_config(config);
     let instrument_id = test_instrument_id();
     let client_order_id = ClientOrderId::from("O-TERM");
+    let venue_order_id = VenueOrderId::from("V-TERM");
 
     ctx.add_instrument(test_instrument());
-    let order = create_submitted_order("O-TERM", instrument_id, OrderSide::Buy, "1.0", "3000.00");
+    let order = create_pending_cancel_order(
+        "O-TERM",
+        instrument_id,
+        OrderSide::Buy,
+        "1.0",
+        "3000.00",
+        venue_order_id,
+    );
     ctx.add_order(order);
 
     ctx.manager.register_inflight(client_order_id);
+    let report = create_order_status_report(
+        Some(client_order_id),
+        venue_order_id,
+        instrument_id,
+        OrderStatus::Accepted,
+        Quantity::from("1.0"),
+        Quantity::from("0"),
+    );
+    ctx.manager
+        .observe_execution_report(&ExecutionReport::Order(Box::new(report)));
     ctx.advance_both(dst::time::Duration::from_millis(200))
         .await;
 
-    // First check generates terminal rejection
+    // First check resolves the pending cancel from the unchanged accepted
+    // report received while the command was in flight
     let result1 = ctx.manager.check_inflight_orders();
     assert_eq!(result1.events.len(), 1);
-    assert!(matches!(result1.events[0], OrderEventAny::Rejected(_)));
+    assert!(matches!(result1.events[0], OrderEventAny::CancelRejected(_)));
 
     // Second check should return empty (tracking was cleared)
     ctx.advance_both(dst::time::Duration::from_millis(200))
