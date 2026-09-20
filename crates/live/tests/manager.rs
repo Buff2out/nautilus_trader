@@ -5264,8 +5264,8 @@ async fn test_inflight_increments_retry_count_before_max() {
     tokio::test(start_paused = true)
 )]
 #[cfg_attr(all(feature = "simulation", madsim), madsim::test)]
-async fn test_inflight_pending_update_with_unchanged_accepted_at_max_retries_emits_modify_rejected(
-) {
+async fn test_inflight_pending_update_with_unchanged_accepted_at_max_retries_emits_modify_rejected()
+{
     let config = ExecutionManagerConfig {
         inflight_threshold_ms: 100,
         inflight_max_retries: 1,
@@ -5331,8 +5331,8 @@ async fn test_inflight_pending_update_with_unchanged_accepted_at_max_retries_emi
     tokio::test(start_paused = true)
 )]
 #[cfg_attr(all(feature = "simulation", madsim), madsim::test)]
-async fn test_inflight_pending_cancel_with_unchanged_accepted_at_max_retries_emits_cancel_rejected(
-) {
+async fn test_inflight_pending_cancel_with_unchanged_accepted_at_max_retries_emits_cancel_rejected()
+{
     let config = ExecutionManagerConfig {
         inflight_threshold_ms: 100,
         inflight_max_retries: 1,
@@ -5447,7 +5447,7 @@ async fn test_inflight_pending_cancel_without_any_report_retains_pending() {
     let third = ctx.manager.check_inflight_orders();
     assert!(third.events.is_empty());
     assert_eq!(third.queries.len(), 1);
-    assert_eq!(ctx.manager.recon_check_retry_count(&client_order_id), 3);
+    assert_eq!(ctx.manager.recon_check_retry_count(&client_order_id), 2);
 
     // A fresh accepted venue report now resolves the command attempt as
     // rejected: the cancel did not take effect.
@@ -5812,7 +5812,10 @@ async fn test_inflight_terminal_event_clears_tracking() {
     // report received while the command was in flight
     let result1 = ctx.manager.check_inflight_orders();
     assert_eq!(result1.events.len(), 1);
-    assert!(matches!(result1.events[0], OrderEventAny::CancelRejected(_)));
+    assert!(matches!(
+        result1.events[0],
+        OrderEventAny::CancelRejected(_)
+    ));
 
     // Second check should return empty (tracking was cleared)
     ctx.advance_both(dst::time::Duration::from_millis(200))

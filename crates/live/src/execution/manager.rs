@@ -72,7 +72,7 @@ use nautilus_model::types::{money::MoneyRaw, quantity::QuantityRaw};
 use nautilus_model::{
     enums::{LiquiditySide, OmsType, OrderSide, OrderStatus, OrderType, TimeInForce},
     events::{
-        OrderCanceled, OrderCancelRejected, OrderEventAny, OrderFilled, OrderInitialized,
+        OrderCancelRejected, OrderCanceled, OrderEventAny, OrderFilled, OrderInitialized,
         OrderModifyRejected,
     },
     identifiers::{
